@@ -1,0 +1,8 @@
+__pycache__/
+*/outputs/
+*/db/
+
+*/data/*
+!*/data/data.json
+# No VIM swap files
+.*.sw*

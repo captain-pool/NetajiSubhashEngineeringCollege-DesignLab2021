@@ -1,0 +1,9 @@
+datapath:
+  input: 'data/data.json'
+  load: 'data/data.pkl'
+models:
+  bert: 'absa/classifier-rest-0.2'
+  vectorizer: 'en_core_web_lg'
+dbpath:
+  score: 'db/scores.pkl'
+  aspects: 'db/aspects'
