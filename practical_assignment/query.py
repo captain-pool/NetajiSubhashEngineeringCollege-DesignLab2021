@@ -34,33 +34,24 @@ def read_data(ifile=pathlib.Path("data.json"), lfile=pathlib.Path("data.pickle")
   return D
 
 
-def get_aspectdb(aspects, vct, dbpath=pathlib.Path("db/aspects")):
+def get_aspectdb(aspects, vct, dbpath=pathlib.Path("db/aspects"), update=False):
   print("[get_aspectdb()]")
   dbpath.parent.mkdir(parents=True, exist_ok=True)
   db = database.VectorDB(str(dbpath), vct.dimension).open()
-  if not db.initialized:
+  if not db.initialized or update:
     for aspect in tqdm.tqdm(aspects):
       db.insert(aspect, vct(aspect).vector)
     db.write()
   return db
 
-
-def search_matching_aspect(aspectdb, vct, aspect):
-  aspectvector = vct(aspect).vector
-  return aspectdb.nearest(aspectvector)[0]
-
-
 def inference(model, row, keywords):
   scores = []
   rating, review = row
-  if not isinstance(keywords, list):
-    keywords = [keywords]
   if review:
     try:
       completed_tasks = model(review, aspects=keywords)
       scores = [float(task.sentiment) - 1 for task in completed_tasks]
     except:
-      print(review, keywords)
       scores = []
   # A review without comment, but with stars
   # contribute equally to all aspects
@@ -83,22 +74,64 @@ def infer(model, reviews, keywords):
   return reduce(scores)
 
 
-def get_scoredb(model, D, keywords, dbpath=pathlib.Path("db/scores.pkl")):
+def get_scoredb(
+    model,
+    D,
+    keywords,
+    update=False,
+    dbpath=pathlib.Path("db/scores.pkl")):
   dbpath.parent.mkdir(parents=True, exist_ok=True)
   scoredb = collections.defaultdict(dict)
   if dbpath.exists():
     with open(dbpath, "rb") as f:
       scoredb = pickle.load(f)
-    return scoredb
+    if not update:
+      return scoredb
+  if not isinstance(keywords, list):
+    keywords = [keywords]
   for org in tqdm.tqdm(D, position=0):
     reviews = D[org]
     scores = infer(model, reviews, keywords)
-    scoredb[org]["stars"] = scores["stars"]
-    scores = {k: v for k, v in zip(keywords, scores["keyword"])}
-    scoredb[org]["scores"] = scores
+    if not update:
+      scoredb[org]["stars"] = scores["stars"]
+      scores = {k: v for k, v in zip(keywords, scores["keyword"])}
+      scoredb[org]["scores"] = scores
+    else:
+      scoredb[org]['scores'].update(
+          {k: v for k, v in zip(keywords, scores['keyword'])})
+
   with open(dbpath, "wb") as f:
     pickle.dump(scoredb, f)
   return scoredb
+
+def get_vocabdb(vct, dbpath=pathlib.Path("db/vocab")):
+  print("[get_vocabdb()]")
+  vocabdb = database.VectorDB(dbpath, vct.dimension).open()
+  if not vocabdb.initialized:
+    for word in tqdm.tqdm(vct.vocab.strings):
+      if word.isalnum():
+        vocabdb.insert(word, vct.vocab[word].vector)
+    vocabdb.write()
+  return vocabdb
+
+def search_aspect(qaspect, vct, vocabdb, aspectdb):
+  def search_matching_vocab_fn(aspectvector):
+    return vocabdb.nearest(aspectvector)[0]
+  if not qaspect.lower() in aspectdb.keys():
+    aspectvct = vct(qaspect).vector
+    aspect_closest = aspectdb.nearest(aspectvct)[0]
+    vocab_closest_aspect = search_matching_vocab_fn(
+        aspectdb.search_vector(
+          aspectdb.nearest(aspectvct)[0]))
+    qaspect = aspect_closest
+    # Synonym search required. issue: Spacy Brown Cluster not working
+    # find vocab entries for query aspect and closest aspect
+    # if they do not belong to the same cluster, they are not the same
+    if aspect_closest.lower() != vocab_closest_aspect.lower():
+      return False, None
+  return True, qaspect
+
+
 
 
 @hydra.main(config_path="config", config_name="config")
@@ -110,6 +143,7 @@ def main(config):
   aspects = constants.ASPECTS
   scoredb = get_scoredb(model, D, aspects, dbpath=root / config.dbpath.score)
   aspectsdb = get_aspectdb(aspects, vct, dbpath=root / config.dbpath.aspects)
+  vocabdb = get_vocabdb(vct, dbpath=root / config.dbpath.vocab)
   while True:
     org = input("enter org (OR 'q<RETURN>' to exit): ").strip().lower()
     if org == "q":
@@ -119,7 +153,14 @@ def main(config):
       continue
     query_aspects = input("enter queries: ").strip().split(", ")
     for qaspect in query_aspects:
-      aspect = search_matching_aspect(aspectsdb, vct, qaspect)
+      present, aspect = search_aspect(qaspect, vct, vocabdb, aspectsdb)
+      if not present:
+        scoredb = get_scoredb(
+            model,
+            D,
+            qaspect,
+            dbpath=root / config.dbpath.score,
+            update=True)
       print(
         "%s: %0.1f / 10 \t stars: %0.1f / 5"
         % (qaspect, scoredb[org]["scores"][aspect], scoredb[org]["stars"])
